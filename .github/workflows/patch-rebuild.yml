@@ -109,7 +109,7 @@ jobs:
 
       - name: Decompile
         run: |
-          java -jar apktool.jar d GoogleCamera.apk -o build/decompiled
+          java -jar apktool.jar d GoogleCamera.apk -o build/decompiled -b
 
       - name: Apply patches
         run: |
