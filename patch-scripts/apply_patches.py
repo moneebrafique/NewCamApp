@@ -187,16 +187,28 @@ def patch_bottombar(decompiled: Path) -> None:
 
 
 def copy_generated_smali(decompiled: Path, generated_smali_dir: Path) -> None:
-    dest = decompiled / "smali" / "com" / "example" / "gcammod"
-    dest.mkdir(parents=True, exist_ok=True)
+    # IMPORTANT: do NOT merge into smali/ (the primary classes.dex) --
+    # GoogleCamera's primary dex is already right at the 64k method/field/
+    # type reference limit (that's why it's already split into
+    # smali_classes2/smali_classes3). Adding anything there pushes it over
+    # the edge and corrupts rebuild. Put our small additions in a fresh
+    # shard instead; modern Android loads multiple dex files natively.
+    existing_shards = [p.name for p in decompiled.glob("smali_classes*") if p.is_dir()]
+    next_n = 1 + max(
+        [int(name.replace("smali_classes", "")) for name in existing_shards] + [1]
+    )
+    shard_name = f"smali_classes{next_n}"
+    dest_root = decompiled / shard_name
+    dest_root.mkdir(parents=True, exist_ok=True)
+
     count = 0
     for smali_file in generated_smali_dir.rglob("*.smali"):
         rel = smali_file.relative_to(generated_smali_dir)
-        target = decompiled / "smali" / rel
+        target = dest_root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(smali_file.read_text(encoding="utf-8"), encoding="utf-8")
         count += 1
-    print(f"Copied {count} generated smali file(s) into {dest.parent}")
+    print(f"Copied {count} generated smali file(s) into new shard {shard_name}/")
 
 
 def main() -> None:
