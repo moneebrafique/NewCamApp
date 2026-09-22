@@ -10,6 +10,9 @@ Applies all patches to a freshly apktool-decompiled GoogleCamera tree:
 4. Insert a small, hand-written smali snippet into BottomBar's
    onFinishInflate() that creates a new button and wires it to launch
    OverlayActivity.
+5. Inject a crash/debug logger at the very top of the real entry
+   Activity's onCreate(), so we can capture what's happening even if
+   something fails before BottomBar (or anything else) ever runs.
 
 Handles both smali register-count conventions:
   .registers N  -- N = total registers, including parameter registers
@@ -186,6 +189,64 @@ def patch_bottombar(decompiled: Path) -> None:
     print(f"Patched BottomBar.onFinishInflate(): {path} (.{directive} {old_count} -> {new_count})")
 
 
+def patch_camera_activity_logging(decompiled: Path) -> None:
+    """
+    Injects CrashLogger.install()/log() calls as the very FIRST instructions
+    in CameraActivity.onCreate() -- the real entry point behind the
+    CameraLauncher activity-alias -- so we capture what's happening even if
+    something fails before BottomBar (or anything else) ever runs.
+    """
+    path = find_smali_file(
+        decompiled,
+        "com/google/android/apps/camera/legacy/app/activity/main/CameraActivity.smali",
+    )
+    text = path.read_text(encoding="utf-8")
+
+    if "# --- gcammod: crash logger installed ---" in text:
+        print("CameraActivity already patched for logging, skipping")
+        return
+
+    method_pattern = re.compile(
+        r"(\.method protected onCreate\(Landroid/os/Bundle;\)V\n"
+        r"\s*\.)(registers|locals)( )(\d+)\n",
+        re.MULTILINE,
+    )
+    match = method_pattern.search(text)
+    if not match:
+        print("ERROR: could not find CameraActivity.onCreate() to patch")
+        idx = text.find("onCreate")
+        if idx != -1:
+            print("--- actual content around onCreate (for debugging) ---")
+            print(text[max(0, idx - 100) : idx + 600])
+        sys.exit(1)
+
+    directive = match.group(2)  # "registers" or "locals"
+    old_count = int(match.group(4))
+
+    if directive == "locals":
+        base = old_count
+        new_count = old_count + 1
+    else:
+        new_count = old_count + 2
+        base = new_count - 1
+
+    injected = f"""    # --- gcammod: crash logger installed ---
+    invoke-static {{p0}}, Lcom/example/gcammod/CrashLogger;->install(Landroid/content/Context;)V
+
+    const-string v{base}, "CameraActivity.onCreate reached"
+
+    invoke-static {{p0, v{base}}}, Lcom/example/gcammod/CrashLogger;->log(Landroid/content/Context;Ljava/lang/String;)V
+    # --- end gcammod ---
+
+"""
+
+    header = f"{match.group(1)}{directive}{match.group(3)}{new_count}\n"
+    insertion_point = match.start() + len(header)
+    patched = text[: match.start()] + header + injected + text[insertion_point:]
+    path.write_text(patched, encoding="utf-8")
+    print(f"Patched CameraActivity.onCreate() for logging: {path} (.{directive} {old_count} -> {new_count})")
+
+
 def copy_generated_smali(decompiled: Path, generated_smali_dir: Path) -> None:
     # IMPORTANT: do NOT merge into smali/ (the primary classes.dex) --
     # GoogleCamera's primary dex is already right at the 64k method/field/
@@ -220,6 +281,7 @@ def main() -> None:
     patch_manifest(decompiled)
     patch_signature_check(decompiled)
     patch_bottombar(decompiled)
+    patch_camera_activity_logging(decompiled)
 
     if len(sys.argv) >= 3:
         copy_generated_smali(decompiled, Path(sys.argv[2]))
