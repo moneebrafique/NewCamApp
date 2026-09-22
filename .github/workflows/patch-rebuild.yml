@@ -1,0 +1,122 @@
+name: Patch and rebuild GoogleCamera
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag of the GitHub Release with base.apk attached (must be named GoogleCamera.apk in the release, or edit the --pattern below)'
+        required: true
+        default: 'v1'
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK (self-contained)
+        run: |
+          export ANDROID_HOME="$HOME/android-sdk"
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          cd "$ANDROID_HOME/cmdline-tools"
+          curl -sSL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip
+          unzip -q cmdline-tools.zip
+          mv cmdline-tools latest
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Compile our Java additions
+        run: |
+          mkdir -p build/classes
+          javac -cp "$ANDROID_HOME/platforms/android-35/android.jar" \
+            -d build/classes \
+            patch-src/com/example/gcammod/*.java
+          find build/classes -name "*.class"
+
+      - name: Convert to dex with d8
+        run: |
+          mkdir -p build/dex
+          "$ANDROID_HOME/build-tools/35.0.0/d8" \
+            --output build/dex \
+            --lib "$ANDROID_HOME/platforms/android-35/android.jar" \
+            $(find build/classes -name "*.class")
+
+      - name: Download baksmali (latest release, resolved dynamically)
+        run: |
+          URL=$(curl -sSL https://api.github.com/repos/JesusFreke/smali/releases/latest \
+            | grep "browser_download_url.*baksmali.*\.jar" \
+            | cut -d '"' -f 4)
+          echo "Downloading $URL"
+          curl -sSL -o baksmali.jar "$URL"
+
+      - name: Disassemble our dex back to smali
+        run: |
+          java -jar baksmali.jar disassemble build/dex/classes.dex -o build/generated-smali
+          find build/generated-smali -name "*.smali"
+
+      - name: Download apktool (latest release, resolved dynamically)
+        run: |
+          URL=$(curl -sSL https://api.github.com/repos/iBotPeaches/Apktool/releases/latest \
+            | grep "browser_download_url.*\.jar" \
+            | cut -d '"' -f 4)
+          echo "Downloading $URL"
+          curl -sSL -o apktool.jar "$URL"
+
+      - name: Download GoogleCamera.apk from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ github.event.inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "GoogleCamera.apk" \
+            --output GoogleCamera.apk
+
+      - name: Decompile
+        run: |
+          java -jar apktool.jar d GoogleCamera.apk -o build/decompiled -r -s
+
+      - name: Apply patches
+        run: |
+          python3 patch-scripts/apply_patches.py build/decompiled build/generated-smali
+
+      - name: Rebuild
+        run: |
+          java -jar apktool.jar b build/decompiled -o build/patched-unsigned.apk
+
+      - name: Generate a self-signed debug key
+        run: |
+          keytool -genkeypair -v \
+            -keystore build/debug.keystore \
+            -alias gcammod \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass gcammod123 -keypass gcammod123 \
+            -dname "CN=gcammod, OU=dev, O=dev, L=dev, S=dev, C=US"
+
+      - name: Sign the APK
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks build/debug.keystore \
+            --ks-pass pass:gcammod123 \
+            --key-pass pass:gcammod123 \
+            --out build/GCamMod-signed.apk \
+            build/patched-unsigned.apk
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GCamMod-signed
+          path: build/GCamMod-signed.apk
