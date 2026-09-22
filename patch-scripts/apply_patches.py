@@ -23,6 +23,22 @@ OLD_AUTHORITY_2 = "com.google.android.apps.camera.specialtypes.SpecialTypesProvi
 NEW_AUTHORITY_2 = "com.example.gcammod.specialtypes.SpecialTypesProvider"
 
 
+def find_smali_file(decompiled: Path, relative_path: str) -> Path:
+    """
+    Large apps get split by apktool into smali/, smali_classes2/,
+    smali_classes3/, etc. (one per dex file). A given class can end up in
+    any of them, so search all of them rather than assuming smali/.
+    """
+    candidates = sorted(decompiled.glob("smali*/" + relative_path))
+    if not candidates:
+        print(f"ERROR: could not find {relative_path} in any smali* directory under {decompiled}")
+        print("Available smali* directories:", [p.name for p in decompiled.glob("smali*") if p.is_dir()])
+        sys.exit(1)
+    if len(candidates) > 1:
+        print(f"WARNING: {relative_path} found in multiple places: {candidates}; using the first")
+    return candidates[0]
+
+
 def patch_manifest(decompiled: Path) -> None:
     manifest = decompiled / "AndroidManifest.xml"
     text = manifest.read_text(encoding="utf-8")
@@ -47,7 +63,7 @@ def patch_manifest(decompiled: Path) -> None:
 
 
 def patch_signature_check(decompiled: Path) -> None:
-    path = decompiled / "smali" / "com" / "pairip" / "SignatureCheck.smali"
+    path = find_smali_file(decompiled, "com/pairip/SignatureCheck.smali")
     text = path.read_text(encoding="utf-8")
 
     if "# --- gcammod: neutered signature check ---" in text:
@@ -83,7 +99,9 @@ def patch_signature_check(decompiled: Path) -> None:
 
 
 def patch_bottombar(decompiled: Path) -> None:
-    path = decompiled / "smali" / "com" / "google" / "android" / "apps" / "camera" / "bottombar" / "BottomBar.smali"
+    path = find_smali_file(
+        decompiled, "com/google/android/apps/camera/bottombar/BottomBar.smali"
+    )
     text = path.read_text(encoding="utf-8")
 
     if "# --- gcammod: injected overlay button ---" in text:
