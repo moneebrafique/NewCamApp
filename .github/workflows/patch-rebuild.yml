@@ -56,11 +56,22 @@ jobs:
             $(find build/classes -name "*.class")
 
       - name: Download baksmali (latest release, resolved dynamically)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          URL=$(curl -sSL https://api.github.com/repos/JesusFreke/smali/releases/latest \
-            | grep "browser_download_url.*baksmali.*\.jar" \
-            | cut -d '"' -f 4)
-          echo "Downloading $URL"
+          API_RESPONSE=$(curl -sSL -H "Authorization: token $GH_TOKEN" \
+            https://api.github.com/repos/JesusFreke/smali/releases/latest)
+          echo "--- available assets ---"
+          echo "$API_RESPONSE" | grep "browser_download_url"
+          URL=$(echo "$API_RESPONSE" \
+            | grep -io '"browser_download_url": *"[^"]*baksmali[^"]*\.jar"' \
+            | grep -o 'https://[^"]*' \
+            | head -n1)
+          echo "Resolved URL: $URL"
+          if [ -z "$URL" ]; then
+            echo "ERROR: no baksmali .jar asset found in latest release"
+            exit 1
+          fi
           curl -sSL -o baksmali.jar "$URL"
 
       - name: Disassemble our dex back to smali
@@ -69,11 +80,22 @@ jobs:
           find build/generated-smali -name "*.smali"
 
       - name: Download apktool (latest release, resolved dynamically)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          URL=$(curl -sSL https://api.github.com/repos/iBotPeaches/Apktool/releases/latest \
-            | grep "browser_download_url.*\.jar" \
-            | cut -d '"' -f 4)
-          echo "Downloading $URL"
+          API_RESPONSE=$(curl -sSL -H "Authorization: token $GH_TOKEN" \
+            https://api.github.com/repos/iBotPeaches/Apktool/releases/latest)
+          echo "--- available assets ---"
+          echo "$API_RESPONSE" | grep "browser_download_url"
+          URL=$(echo "$API_RESPONSE" \
+            | grep -io '"browser_download_url": *"[^"]*\.jar"' \
+            | grep -o 'https://[^"]*' \
+            | head -n1)
+          echo "Resolved URL: $URL"
+          if [ -z "$URL" ]; then
+            echo "ERROR: no apktool .jar asset found in latest release"
+            exit 1
+          fi
           curl -sSL -o apktool.jar "$URL"
 
       - name: Download GoogleCamera.apk from the release
