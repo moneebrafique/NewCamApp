@@ -14,9 +14,18 @@ Applies all patches to a freshly apktool-decompiled GoogleCamera tree:
    Activity's onCreate(), so we can capture what's happening even if
    something fails before BottomBar (or anything else) ever runs.
 
-Handles both smali register-count conventions:
-  .registers N  -- N = total registers, including parameter registers
-  .locals N     -- N = local registers only; parameters are separate
+Register strategy: rather than allocating new high-numbered registers
+(which requires bumping .registers/.locals and risks exceeding the
+4-bit v0-v15 limit of non-/range instructions), we always reuse the
+lowest-numbered local registers (v0, v1, v2). This is safe because:
+  - At the very START of a method, the dex verifier guarantees the
+    original code never reads a local register before writing it first
+    -- so any local register is safe to clobber before original code
+    runs, since original code will overwrite it before ever reading it.
+  - At the very END of a method (right before return-void), nothing
+    reads any register afterward, so clobbering low registers there is
+    equally safe.
+This avoids touching the register-count declaration entirely.
 
 Run from the repo root: python3 patch-scripts/apply_patches.py decompiled/
 """
@@ -107,6 +116,13 @@ def patch_signature_check(decompiled: Path) -> None:
 
 
 def patch_bottombar(decompiled: Path) -> None:
+    """
+    Inserts a new button right before the method's final return-void.
+    Uses only v0/v1/v2 -- safe because nothing reads any register after
+    this point (the method just returns), so clobbering them is fine
+    regardless of what they held before, and no register-count bump is
+    needed at all.
+    """
     path = find_smali_file(
         decompiled, "com/google/android/apps/camera/bottombar/BottomBar.smali"
     )
@@ -116,11 +132,9 @@ def patch_bottombar(decompiled: Path) -> None:
         print("BottomBar already patched, skipping")
         return
 
-    # Capture which directive is used (registers or locals) since the
-    # arithmetic for adding new scratch registers differs between them.
     method_pattern = re.compile(
-        r"\.method protected final onFinishInflate\(\)V\n"
-        r"\s*\.(registers|locals) (\d+)\n"
+        r"(\.method protected final onFinishInflate\(\)V\n"
+        r"\s*\.(?:registers|locals) \d+\n)"
         r"((?:.*\n)*?)"
         r"(\s*return-void\n)"
         r"\.end method",
@@ -135,58 +149,35 @@ def patch_bottombar(decompiled: Path) -> None:
             print(text[max(0, idx - 100) : idx + 600])
         sys.exit(1)
 
-    directive = match.group(1)  # "registers" or "locals"
-    old_count = int(match.group(2))
-
-    if directive == "locals":
-        # .locals N means N local registers (v0..v(N-1)); parameters are
-        # separate, auto-assigned above them. New locals just extend N.
-        base = old_count
-        new_count = old_count + 3
-    else:
-        # .registers N means N total registers including parameters, with
-        # parameters occupying the topmost slots. Leave headroom above the
-        # existing total so our new scratch registers don't collide with
-        # anything, then place params at the very top as before.
-        new_count = old_count + 4
-        base = new_count - 3
-
-    injected = f"""
+    injected = """
     # --- gcammod: injected overlay button ---
-    invoke-virtual {{p0}}, Landroid/view/View;->getContext()Landroid/content/Context;
+    invoke-virtual {p0}, Landroid/view/View;->getContext()Landroid/content/Context;
 
-    move-result-object v{base}
+    move-result-object v0
 
-    new-instance v{base + 1}, Landroid/widget/Button;
+    new-instance v1, Landroid/widget/Button;
 
-    invoke-direct {{v{base + 1}, v{base}}}, Landroid/widget/Button;-><init>(Landroid/content/Context;)V
+    invoke-direct {v1, v0}, Landroid/widget/Button;-><init>(Landroid/content/Context;)V
 
-    const-string v{base + 2}, "+Media"
+    const-string v2, "+Media"
 
-    invoke-virtual {{v{base + 1}, v{base + 2}}}, Landroid/widget/Button;->setText(Ljava/lang/CharSequence;)V
+    invoke-virtual {v1, v2}, Landroid/widget/Button;->setText(Ljava/lang/CharSequence;)V
 
-    new-instance v{base + 2}, Lcom/example/gcammod/OverlayButtonClickListener;
+    new-instance v2, Lcom/example/gcammod/OverlayButtonClickListener;
 
-    invoke-direct {{v{base + 2}, v{base}}}, Lcom/example/gcammod/OverlayButtonClickListener;-><init>(Landroid/content/Context;)V
+    invoke-direct {v2, v0}, Lcom/example/gcammod/OverlayButtonClickListener;-><init>(Landroid/content/Context;)V
 
-    invoke-virtual {{v{base + 1}, v{base + 2}}}, Landroid/widget/Button;->setOnClickListener(Landroid/view/View$OnClickListener;)V
+    invoke-virtual {v1, v2}, Landroid/widget/Button;->setOnClickListener(Landroid/view/View$OnClickListener;)V
 
-    invoke-virtual {{p0, v{base + 1}}}, Lcom/google/android/apps/camera/bottombar/BottomBar;->addView(Landroid/view/View;)V
+    invoke-virtual {p0, v1}, Lcom/google/android/apps/camera/bottombar/BottomBar;->addView(Landroid/view/View;)V
     # --- end gcammod ---
 
 """
 
-    replacement = (
-        ".method protected final onFinishInflate()V\n"
-        f"    .{directive} {new_count}\n"
-        + match.group(3)
-        + injected
-        + match.group(4)
-        + ".end method"
-    )
+    replacement = match.group(1) + match.group(2) + injected + match.group(3) + ".end method"
     patched = text[: match.start()] + replacement + text[match.end() :]
     path.write_text(patched, encoding="utf-8")
-    print(f"Patched BottomBar.onFinishInflate(): {path} (.{directive} {old_count} -> {new_count})")
+    print(f"Patched BottomBar.onFinishInflate(): {path}")
 
 
 def patch_camera_activity_logging(decompiled: Path) -> None:
@@ -195,6 +186,11 @@ def patch_camera_activity_logging(decompiled: Path) -> None:
     in CameraActivity.onCreate() -- the real entry point behind the
     CameraLauncher activity-alias -- so we capture what's happening even if
     something fails before BottomBar (or anything else) ever runs.
+
+    Uses only v0 -- safe because the dex verifier guarantees the original
+    code never reads a local register before writing it first, so any
+    local register is safe to clobber before original code runs. No
+    register-count bump needed.
     """
     path = find_smali_file(
         decompiled,
@@ -207,8 +203,8 @@ def patch_camera_activity_logging(decompiled: Path) -> None:
         return
 
     method_pattern = re.compile(
-        r"(\.method protected onCreate\(Landroid/os/Bundle;\)V\n"
-        r"\s*\.)(registers|locals)( )(\d+)\n",
+        r"\.method protected onCreate\(Landroid/os/Bundle;\)V\n"
+        r"\s*\.(?:registers|locals) \d+\n",
         re.MULTILINE,
     )
     match = method_pattern.search(text)
@@ -220,31 +216,20 @@ def patch_camera_activity_logging(decompiled: Path) -> None:
             print(text[max(0, idx - 100) : idx + 600])
         sys.exit(1)
 
-    directive = match.group(2)  # "registers" or "locals"
-    old_count = int(match.group(4))
+    injected = """    # --- gcammod: crash logger installed ---
+    invoke-static {p0}, Lcom/example/gcammod/CrashLogger;->install(Landroid/content/Context;)V
 
-    if directive == "locals":
-        base = old_count
-        new_count = old_count + 1
-    else:
-        new_count = old_count + 2
-        base = new_count - 1
+    const-string v0, "CameraActivity.onCreate reached"
 
-    injected = f"""    # --- gcammod: crash logger installed ---
-    invoke-static {{p0}}, Lcom/example/gcammod/CrashLogger;->install(Landroid/content/Context;)V
-
-    const-string v{base}, "CameraActivity.onCreate reached"
-
-    invoke-static {{p0, v{base}}}, Lcom/example/gcammod/CrashLogger;->log(Landroid/content/Context;Ljava/lang/String;)V
+    invoke-static {p0, v0}, Lcom/example/gcammod/CrashLogger;->log(Landroid/content/Context;Ljava/lang/String;)V
     # --- end gcammod ---
 
 """
 
-    header = f"{match.group(1)}{directive}{match.group(3)}{new_count}\n"
-    insertion_point = match.start() + len(header)
-    patched = text[: match.start()] + header + injected + text[insertion_point:]
+    insertion_point = match.end()
+    patched = text[:insertion_point] + injected + text[insertion_point:]
     path.write_text(patched, encoding="utf-8")
-    print(f"Patched CameraActivity.onCreate() for logging: {path} (.{directive} {old_count} -> {new_count})")
+    print(f"Patched CameraActivity.onCreate() for logging: {path}")
 
 
 def copy_generated_smali(decompiled: Path, generated_smali_dir: Path) -> None:
