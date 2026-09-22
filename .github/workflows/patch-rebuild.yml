@@ -60,7 +60,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           API_RESPONSE=$(curl -sSL -H "Authorization: token $GH_TOKEN" \
-            https://api.github.com/repos/JesusFreke/smali/releases/latest)
+            https://api.github.com/repos/baksmali/smali/releases/latest)
           echo "--- available assets ---"
           echo "$API_RESPONSE" | grep "browser_download_url"
           URL=$(echo "$API_RESPONSE" \
