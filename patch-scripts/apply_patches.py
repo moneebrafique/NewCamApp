@@ -84,6 +84,10 @@ def patch_signature_check(decompiled: Path) -> None:
     match = pattern.search(text)
     if not match:
         print("ERROR: could not find verifyIntegrity method to patch")
+        idx = text.find("verifyIntegrity")
+        if idx != -1:
+            print("--- actual content around verifyIntegrity (for debugging) ---")
+            print(text[max(0, idx - 100) : idx + 600])
         sys.exit(1)
 
     replacement = (
@@ -119,6 +123,10 @@ def patch_bottombar(decompiled: Path) -> None:
     match = method_pattern.search(text)
     if not match:
         print("ERROR: could not find onFinishInflate() method to patch")
+        idx = text.find("onFinishInflate")
+        if idx != -1:
+            print("--- actual content around onFinishInflate (for debugging) ---")
+            print(text[max(0, idx - 100) : idx + 600])
         sys.exit(1)
 
     old_register_count = int(match.group(2))
