@@ -11,6 +11,10 @@ Applies all patches to a freshly apktool-decompiled GoogleCamera tree:
    onFinishInflate() that creates a new button and wires it to launch
    OverlayActivity.
 
+Handles both smali register-count conventions:
+  .registers N  -- N = total registers, including parameter registers
+  .locals N     -- N = local registers only; parameters are separate
+
 Run from the repo root: python3 patch-scripts/apply_patches.py decompiled/
 """
 import re
@@ -49,7 +53,6 @@ def patch_manifest(decompiled: Path) -> None:
     if text == before:
         print("WARNING: manifest patch made no changes -- check OLD_PACKAGE constant")
 
-    # Add our new activity right before </application>
     new_activity = (
         '        <activity android:name="com.example.gcammod.OverlayActivity" '
         'android:theme="@android:style/Theme.Translucent.NoTitleBar" '
@@ -70,13 +73,11 @@ def patch_signature_check(decompiled: Path) -> None:
         print("SignatureCheck already patched, skipping")
         return
 
-    # Replace the ENTIRE method body (whatever it contains -- annotations
-    # may or may not be present depending on apktool's decode settings)
-    # with a single unconditional return. We don't need to preserve any of
-    # the original logic; we're intentionally disabling this check.
+    # We discard the whole body regardless of convention, so we only need
+    # to match either directive, not interpret its count.
     pattern = re.compile(
-        r"(\.method public static verifyIntegrity\(Landroid/content/Context;\)V\n"
-        r"\s*\.registers )(\d+)\n"
+        r"\.method public static verifyIntegrity\(Landroid/content/Context;\)V\n"
+        r"\s*\.(?:registers|locals) \d+\n"
         r"(?:.*\n)*?"
         r"\.end method",
         re.MULTILINE,
@@ -92,7 +93,7 @@ def patch_signature_check(decompiled: Path) -> None:
 
     replacement = (
         ".method public static verifyIntegrity(Landroid/content/Context;)V\n"
-        "    .registers 1\n"
+        "    .locals 0\n"
         "    # --- gcammod: neutered signature check ---\n"
         "    return-void\n"
         ".end method"
@@ -112,9 +113,11 @@ def patch_bottombar(decompiled: Path) -> None:
         print("BottomBar already patched, skipping")
         return
 
+    # Capture which directive is used (registers or locals) since the
+    # arithmetic for adding new scratch registers differs between them.
     method_pattern = re.compile(
         r"\.method protected final onFinishInflate\(\)V\n"
-        r"(\s*\.registers )(\d+)\n"
+        r"\s*\.(registers|locals) (\d+)\n"
         r"((?:.*\n)*?)"
         r"(\s*return-void\n)"
         r"\.end method",
@@ -129,9 +132,21 @@ def patch_bottombar(decompiled: Path) -> None:
             print(text[max(0, idx - 100) : idx + 600])
         sys.exit(1)
 
-    old_register_count = int(match.group(2))
-    new_register_count = old_register_count + 4  # room for 4 new scratch locals
-    base = new_register_count - 3  # three fresh scratch registers we'll use
+    directive = match.group(1)  # "registers" or "locals"
+    old_count = int(match.group(2))
+
+    if directive == "locals":
+        # .locals N means N local registers (v0..v(N-1)); parameters are
+        # separate, auto-assigned above them. New locals just extend N.
+        base = old_count
+        new_count = old_count + 3
+    else:
+        # .registers N means N total registers including parameters, with
+        # parameters occupying the topmost slots. Leave headroom above the
+        # existing total so our new scratch registers don't collide with
+        # anything, then place params at the very top as before.
+        new_count = old_count + 4
+        base = new_count - 3
 
     injected = f"""
     # --- gcammod: injected overlay button ---
@@ -160,7 +175,7 @@ def patch_bottombar(decompiled: Path) -> None:
 
     replacement = (
         ".method protected final onFinishInflate()V\n"
-        f"    .registers {new_register_count}\n"
+        f"    .{directive} {new_count}\n"
         + match.group(3)
         + injected
         + match.group(4)
@@ -168,7 +183,7 @@ def patch_bottombar(decompiled: Path) -> None:
     )
     patched = text[: match.start()] + replacement + text[match.end() :]
     path.write_text(patched, encoding="utf-8")
-    print(f"Patched BottomBar.onFinishInflate(): {path} (registers {old_register_count} -> {new_register_count})")
+    print(f"Patched BottomBar.onFinishInflate(): {path} (.{directive} {old_count} -> {new_count})")
 
 
 def copy_generated_smali(decompiled: Path, generated_smali_dir: Path) -> None:
